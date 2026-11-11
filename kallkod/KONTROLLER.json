@@ -1,0 +1,44 @@
+{
+  "version": "1.0.0",
+  "date": "2026-11-11",
+  "model_tests": {
+    "count": 20,
+    "status": "passed",
+    "python_js_numeric_comparisons": 23718
+  },
+  "ui_contract_checks": {
+    "checks": "all six page render functions, Leaflet API calls, metric/layer changes, selection, Monte Carlo, form application, CSV/JSON/GeoJSON/project downloads, CSV import, duplicate rejection",
+    "leaflet_features_processed": 24012,
+    "graphical_browser_test": false,
+    "streamlit_runtime_test": false,
+    "baseline_ton": 384325.4630346203
+  },
+  "grid_receipt": {
+    "crs": "EPSG:3006",
+    "cell_size_m": 250,
+    "grid_origin": "Multiples of 250 m in EPSG:3006",
+    "source": "SCB DeSO 2025_v2 intersected with supplied OSM land polygons",
+    "cell_boundary_policy": "Split cells at DeSO boundaries; no population interpolation",
+    "household_and_population_counts_per_cell": null,
+    "areas": 209,
+    "unique_cells": 2772,
+    "cell_fragments": 4468,
+    "land_m2": 159253953.97118992,
+    "repaired_source_geometries": [
+      "1280C1110"
+    ],
+    "sum_fragment_m2": 159253953.97113404,
+    "closure_error_m2": -5.587935447692871e-05,
+    "display_simplification_m": 0.2,
+    "area_before_display_simplification": true
+  },
+  "graphical_browser_check": "not completed: browser process could not create required socket in execution environment",
+  "streamlit_end_to_end": "not completed: Streamlit dependency could not be installed in execution environment",
+  "static_map": "visually reviewed; footer overlap corrected",
+  "source_data_hashes": {
+    "road2zero_sakerhetskopia_2026-11-05_v0.12.1.zip": "f997514a3848b92fa84cdd8d38d4ac0ecf7d33f2cef4a27ee86b8dea334bc1cd",
+    "Vagvis_2.3.0_ENKEL_med_datahamtning(1).zip": "c3fd808e84a16ca1d1ecc522f3f0e3deb45f0316579e6166cbeaf08f36b8c592",
+    "Vagvis_2.3.1_GTFS_GitHub(1).zip": "d3e3bd2e6c944197d81ebb4bef07dd2426ff6da59bcb6bc0148279820b0231d2",
+    "Transporteffektivt läge i Vägvis.docx": "5b9549d75ee7570989d1aa3fd4df1af5aff3e3b74d8bf6f45d669a041ad907d1"
+  }
+}
