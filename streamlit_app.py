@@ -16,7 +16,7 @@ import math
 from pathlib import Path
 from statistics import mean
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 MODE_IDS = ("walk", "cycle", "car", "bus", "rail", "air", "other")
 DATA_NAME = "lagesvis_data.json"
 
@@ -68,7 +68,7 @@ def validate_config(data, raw=None):
         fail("Okänd geografisk fördelningsmetod.")
     if c["other_method"] not in ("land_average", "custom"):
         fail("Okänd faktor för övriga färdmedel.")
-    for key in ["future_enabled", "include_air_nonco2"]:
+    for key in ["future_enabled", "include_air_nonco2", "include_air"]:
         if not isinstance(c[key], bool):
             fail(key + " ska vara true eller false.")
     for name in ["activity_target", "factor_target", "factor_cv", "activity_scale"]:
@@ -215,6 +215,10 @@ def baseline_activity(data, c, overrides):
     idx = {p["id"]: i for i,p in enumerate(ps)}
     for row in overrides:
         out[row["mode"]][idx[row["deso"]]] = row["pkm_year"]
+    # Scope is applied after imports so excluded flights cannot reappear.
+    # Overrides remain stored, allowing the same project to be toggled back.
+    if not c["include_air"]:
+        out["air"] = [0.0] * len(ps)
     return out
 
 
@@ -271,7 +275,7 @@ def calculate(data, raw_config=None, raw_overrides=None):
     if not math.isclose(sum(x["ton"] for x in series),city["period_ton"],rel_tol=1e-10,abs_tol=1e-5):
         raise ArithmeticError("Årsserien stämmer inte med periodens summa.")
     return dict(version=VERSION,config=c,overrides=overrides,factors_kg_pkm=ef,areas=result,city=city,series=series,
-                scope="RVU-baserad screening för ålder 15–84 år med eventuellt antaget ålderstillägg; alla sju huvudfärdmedel. Blandade systemgränser; inte fullständig cradle-to-cradle-LCA.",
+                scope="RVU-baserad screening för ålder 15–84 år med eventuellt antaget ålderstillägg; " + ("flyg inkluderat" if c["include_air"] else "flyg exkluderat") + ". Blandade systemgränser; inte fullständig cradle-to-cradle-LCA.",
                 units=dict(annual_ton="ton CO2e/år",period_ton="ton CO2e under vald period",annual_ton_hh="ton CO2e/(hushåll·år)",annual_ton_person="ton CO2e/(invånare·år)",period_ton_hh="ton CO2e/hushåll under vald period",mode_pkm="personkm/basår 2024",factors_kg_pkm="kg CO2e/personkm"),
                 source_sha256=data["source_hashes"],input_year=2024,geography="DeSO 2025 / 250 m visningsrutor EPSG:3006")
 
