@@ -16,7 +16,7 @@ import math
 from pathlib import Path
 from statistics import mean
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 MODE_IDS = ("walk", "cycle", "car", "bus", "rail", "air", "other")
 DATA_NAME = "lagesvis_data.json"
 
@@ -82,10 +82,12 @@ def validate_config(data, raw=None):
         finite(value, "index_weights:" + key, 0, 100)
     if sum(c["index_weights"].values()) <= 0:
         fail("Minst en indexvikt måste vara större än noll.")
-    return c
+    return validate_mobility_config(data, c)
 
 
 def validate_data(data):
+    if data.get("version") != VERSION:
+        fail("Program och datafil ska båda vara version " + VERSION + ". Ersätt streamlit_app.py och lagesvis_data.json tillsammans.")
     if data.get("schema") != "lagesvis-data-1":
         fail("Datafilens schema stöds inte.")
     if data.get("base_year") != 2024 or data.get("deso_version") != "2025":
@@ -99,6 +101,9 @@ def validate_data(data):
             finite(p[key], p["id"] + ":" + key)
         if p["eligible_population"] > p["population"] or not p["land_m2"]:
             fail("Ålderspopulation eller landyta är ogiltig.")
+        for key in ["transit_weekday", "transit_weekend", "transit_morning", "transit_evening", "transit_served_share"]:
+            if p.get(key) is not None:
+                finite(p[key],p["id"]+":"+key,0,1 if key=="transit_served_share" else 100000)
         for key in ["income", "centre_km", "service_km", "node_km", "transit_supply"]:
             if p[key] is not None:
                 finite(p[key], p["id"] + ":" + key)
@@ -235,11 +240,138 @@ def horizon_weights(data, c):
     return {mode: sum(year_multiplier(data,c,mode,year) for year in range(c["start_year"],c["start_year"]+c["years"])) for mode in MODE_IDS}
 
 
-def calculate(data, raw_config=None, raw_overrides=None):
+"""Transparent extensions. No inferred route times or causal elasticities."""
+ROUTE_FIELDS = {"deso", "destination", "purpose", "walk_min", "cycle_min", "transit_min", "car_min", "jobs", "year", "period", "kind", "source"}
+
+
+def household_car_reference(work_age, smallhouse, rental, single):
+    values = (work_age, smallhouse, rental, single)
+    if all(x is None for x in values):
+        return None
+    if any(x is None for x in values):
+        fail("Planprofilen behöver samtliga fyra andelar; saknade värden ersätts inte.")
+    for label, value in zip(("20–64 år", "Småhus", "Hyresrätter", "Singelhushåll"), values):
+        finite(value, label + " som andel 0–1", 0, 1)
+    value = 1.148 - .310*work_age + .434*smallhouse - .239*rental - .901*single
+    return dict(cars_per_household=value if value >= 0 else None,
+                raw_prediction=value, negative_prediction=value < 0,
+                status="Överförd regression från 109 Malmö-delområden, inte validerad på DeSO eller nya bostadsprojekt",
+                source="Kerttu (2025), bilaga 3, PDF-sida 5")
+
+
+def validate_mobility_config(data, c):
+    if not isinstance(c["mobility_enabled"], bool):
+        fail("mobility_enabled ska vara true eller false.")
+    ids = {p["id"] for p in data["profiles"]}
+    if c["mobility_target"] != "all" and c["mobility_target"] not in ids:
+        fail("Välj hela Malmö eller en befintlig DeSO för mobilitetsscenariot.")
+    for k in ["mobility_car_reduction", "mobility_walk_share", "mobility_cycle_share", "mobility_bus_share", "mobility_rail_share"]:
+        finite(c[k], k, 0, 1)
+    if abs(sum(c["mobility_"+m+"_share"] for m in ("walk", "cycle", "bus", "rail"))-1) > 1e-9:
+        fail("Fördelningen av överflyttade personkilometer ska summera till 100 procent.")
+    for k in ["mobility_source", "planning_source"]:
+        if not isinstance(c[k], str) or len(c[k]) > 4000:
+            fail(k + " ska vara en text på högst 4 000 tecken.")
+    if c["mobility_enabled"] and c["mobility_car_reduction"] and not c["mobility_source"].strip():
+        fail("Dokumentera källa eller eget antagande för mobilitetsscenariot.")
+    estimate = household_car_reference(*(c["planning_"+k] for k in ("work_age", "smallhouse", "rental", "single")))
+    if estimate and not c["planning_source"].strip():
+        fail("Ange källa eller eget antagande för planprofilens andelar.")
+    return c
+
+
+def validate_routes(data, rows=None):
+    if rows is None:
+        return []
+    if not isinstance(rows, list) or len(rows) > 100000:
+        fail("Restidsunderlaget ska vara en lista med högst 100 000 rader.")
+    ids = {p["id"] for p in data["profiles"]}
+    seen, contexts, out, definitions = set(), set(), [], {}
+    for r in rows:
+        if not isinstance(r, dict) or set(r) != ROUTE_FIELDS:
+            fail("Restidsraden har fel kolumner. Använd den medföljande CSV-mallen.")
+        if r["deso"] not in ids:
+            fail("Restidsrad: okänd DeSO 2025 i Malmö.")
+        for key in ["destination", "period", "source"]:
+            if not isinstance(r[key], str) or not r[key].strip() or len(r[key]) > 1000:
+                fail("Restidsrad: " + key + " saknas eller är för lång.")
+        if r["purpose"] not in ("service", "node", "job_cell", "other") or r["kind"] not in ("observed", "modelled", "scenario"):
+            fail("Restidsrad: okänd målpunktstyp eller datastatus.")
+        finite(r["year"], "Restidsår", 2000, 2100)
+        if int(r["year"]) != r["year"]:
+            fail("Restidsår ska vara ett heltal.")
+        contexts.add((r["year"], r["period"], r["kind"]))
+        if len(contexts) != 1:
+            fail("Blanda inte år, tidsfönster eller datastatus i samma restidsunderlag.")
+        key = (r["deso"], r["destination"])
+        if key in seen:
+            fail("Dubbla restider för " + "/".join(key))
+        seen.add(key)
+        for field in ["walk_min", "cycle_min", "transit_min", "car_min"]:
+            if r[field] is not None:
+                finite(r[field], field, 0, 1440)
+        if all(r[field] is None for field in ["walk_min", "cycle_min", "transit_min", "car_min"]):
+            fail("Restidsraden behöver minst en dokumenterad restid.")
+        if r["jobs"] is not None:
+            finite(r["jobs"], "Arbetsplatser", 0, 10000000)
+            if r["purpose"] != "job_cell":
+                fail("Arbetsplatsantal anges endast för disjunkta job_cell-målpunkter.")
+        definition = (r["purpose"], r["jobs"])
+        if r["destination"] in definitions and definitions[r["destination"]] != definition:
+            fail("Samma målpunkt har motstridig typ eller arbetsplatsantal.")
+        definitions[r["destination"]] = definition
+        out.append(dict(r))
+    return out
+
+
+def route_summaries(data, rows):
+    out = {}
+    for p in data["profiles"]:
+        rs = [r for r in rows if r["deso"] == p["id"]]
+        ratios = {m:[r[m+"_min"]/r["car_min"] for r in rs if r[m+"_min"] is not None and r["car_min"] is not None and r["car_min"] > 0] for m in ("transit", "cycle")}
+        jobs = [r for r in rs if r["purpose"] == "job_cell" and r["jobs"] is not None and r["transit_min"] is not None]
+        def median(xs):
+            s = sorted(xs); n = len(s)
+            return (s[(n-1)//2]+s[n//2])/2 if n else None
+        out[p["id"]] = dict(route_count=len(rs),
+            transit_car_ratio=median(ratios["transit"]),cycle_car_ratio=median(ratios["cycle"]),
+            ratio_pairs=len(ratios["transit"]),
+            jobs_15_min=sum(r["jobs"] for r in jobs if r["transit_min"] <= 15) if jobs else None,
+            jobs_30_min=sum(r["jobs"] for r in jobs if r["transit_min"] <= 30) if jobs else None,
+            job_cells=len(jobs),
+            route_year=rs[0]["year"] if rs else None,route_period=rs[0]["period"] if rs else None,
+            route_kind=rs[0]["kind"] if rs else None)
+    return out
+
+
+def apply_mobility(data, c, original):
+    activity = {m:list(values) for m,values in original.items()}
+    removed = 0.0
+    if c["mobility_enabled"]:
+        for i,p in enumerate(data["profiles"]):
+            if c["mobility_target"] not in ("all", p["id"]):
+                continue
+            shift = original["car"][i]*c["mobility_car_reduction"]
+            activity["car"][i] -= shift
+            removed += shift
+            for mode in ("walk", "cycle", "bus", "rail"):
+                activity[mode][i] += shift*c["mobility_"+mode+"_share"]
+    balance = sum(sum(activity[m])-sum(original[m]) for m in MODE_IDS)
+    if abs(balance) > max(1e-5, removed*1e-10):
+        raise ArithmeticError("Mobilitetsscenariots personkilometer stämmer inte.")
+    return activity, dict(enabled=c["mobility_enabled"],target=c["mobility_target"],
+        removed_car_pkm=removed,pkm_balance_error=balance,source=c["mobility_source"],
+        status="Användarvalt scenario med bevarade personkilometer, inte skattad effekt av parkering eller tillgänglighet")
+
+
+def calculate(data, raw_config=None, raw_overrides=None, raw_routes=None):
     c = validate_config(data, raw_config)
     overrides = validate_overrides(data, raw_overrides)
     ef = factors(data,c)
-    activity = baseline_activity(data,c,overrides)
+    original_activity = baseline_activity(data,c,overrides)
+    activity, mobility = apply_mobility(data,c,original_activity)
+    routes = validate_routes(data, raw_routes)
+    route_by = route_summaries(data, routes)
     horizon = horizon_weights(data,c)
     result = []
     for i,p in enumerate(data["profiles"]):
@@ -260,9 +392,23 @@ def calculate(data, raw_config=None, raw_overrides=None):
                            availability=accessible["score"],index_coverage=accessible["available"]/accessible["total"] if accessible["total"] else None,
                            income=p["income"],centre_km=p["centre_km"],service_km=p["service_km"],node_km=p["node_km"],transit_supply=p["transit_supply"],
                            land_ha=p["land_m2"]/10000,km_anchor=p["km_anchor"],km_gtfs=p["km_gtfs"]))
+    for i, row in enumerate(result):
+        p = data["profiles"][i]
+        row["population_density_ha"] = p["population"]/(p["land_m2"]/10000)
+        row["household_density_ha"] = p["households"]/(p["land_m2"]/10000)
+        for key in ["transit_weekday", "transit_weekend", "transit_morning", "transit_evening", "transit_served_share"]:
+            row[key] = p.get(key)
+        row["allocated_car_km_per_registered_car"] = activity["car"][i]/c["occupancy"]/p["cars"] if p["cars"] else None
+        row["reference_annual_ton"] = sum(original_activity[m][i]*ef[m]*year_multiplier(data,c,m,c["start_year"])/1000 for m in MODE_IDS)
+        row["scenario_delta_ton"] = row["annual_ton"]-row["reference_annual_ton"]
+        row.update(route_by[p["id"]])
     city = dict(annual_ton=sum(r["annual_ton"] for r in result),period_ton=sum(r["period_ton"] for r in result),
                 base_ton=sum(r["base_ton"] for r in result),households=sum(p["households"] for p in data["profiles"]),
                 population=sum(p["population"] for p in data["profiles"]),cars=sum(p["cars"] for p in data["profiles"]))
+    city["reference_annual_ton"] = sum(r["reference_annual_ton"] for r in result)
+    city["scenario_delta_ton"] = city["annual_ton"]-city["reference_annual_ton"]
+    city["population_density_ha"] = city["population"]/(sum(p["land_m2"] for p in data["profiles"])/10000)
+    city["route_areas"] = sum(r["route_count"]>0 for r in result)
     city["annual_ton_hh"] = city["annual_ton"]/city["households"]
     city["annual_ton_person"] = city["annual_ton"]/city["population"]
     city["period_ton_hh"] = city["period_ton"]/city["households"]
@@ -274,8 +420,8 @@ def calculate(data, raw_config=None, raw_overrides=None):
               for year in range(c["start_year"],c["start_year"]+c["years"])]
     if not math.isclose(sum(x["ton"] for x in series),city["period_ton"],rel_tol=1e-10,abs_tol=1e-5):
         raise ArithmeticError("Årsserien stämmer inte med periodens summa.")
-    return dict(version=VERSION,config=c,overrides=overrides,factors_kg_pkm=ef,areas=result,city=city,series=series,
-                scope="RVU-baserad screening för ålder 15–84 år med eventuellt antaget ålderstillägg; " + ("flyg inkluderat" if c["include_air"] else "flyg exkluderat") + ". Blandade systemgränser; inte fullständig cradle-to-cradle-LCA.",
+    return dict(version=VERSION,config=c,overrides=overrides,route_data=routes,mobility=mobility,planning_reference=household_car_reference(*(c["planning_"+k] for k in ("work_age", "smallhouse", "rental", "single"))),factors_kg_pkm=ef,areas=result,city=city,series=series,
+                scope="RVU-baserad screening för ålder 15–84 år med eventuellt antaget ålderstillägg; " + ("flyg inkluderat" if c["include_air"] else "flyg exkluderat") + ("; användarvalt mobilitetsscenario" if c["mobility_enabled"] else "") + ". Blandade systemgränser; inte fullständig cradle-to-cradle-LCA.",
                 units=dict(annual_ton="ton CO2e/år",period_ton="ton CO2e under vald period",annual_ton_hh="ton CO2e/(hushåll·år)",annual_ton_person="ton CO2e/(invånare·år)",period_ton_hh="ton CO2e/hushåll under vald period",mode_pkm="personkm/basår 2024",factors_kg_pkm="kg CO2e/personkm"),
                 source_sha256=data["source_hashes"],input_year=2024,geography="DeSO 2025 / 250 m visningsrutor EPSG:3006")
 
@@ -421,13 +567,15 @@ def cli():
     parser.add_argument("--simulera",action="store_true",help="Inkludera antagandebaserat scenariointervall")
     args = parser.parse_args()
     data = load_data()
-    config = overrides = None
+    config = overrides = routes = None
     if args.projekt:
         project = json.loads(Path(args.projekt).read_text(encoding="utf-8-sig"))
         if project.get("schema") != "lagesvis-project-1":
             fail("Projektfilens schema stöds inte.")
-        config,overrides = project["config"],project.get("overrides",[])
-    result = calculate(data,config,overrides)
+        if project.get("base_year") != data["base_year"]:
+            fail("Projektfilens basår stöds inte.")
+        config,overrides,routes = project["config"],project.get("overrides",[]),project.get("route_data",[])
+    result = calculate(data,config,overrides,routes)
     if args.simulera:
         result["uncertainty"] = simulate(data,result)
     if args.html:
